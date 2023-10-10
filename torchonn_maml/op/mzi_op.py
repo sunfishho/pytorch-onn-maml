@@ -19,7 +19,7 @@ from pyutils.quantize import uniform_quantize, uniform_quantize_cpu
 from pyutils.torch_train import apply_weight_decay, set_torch_deterministic
 from torch import Tensor
 from torch.types import Device, _size
-from torchonn.op.matrix_parametrization import RealUnitaryDecomposerBatch
+from torchonn_maml.op.matrix_parametrization import RealUnitaryDecomposerBatch
 
 __all__ = [
     "phase_quantize_fn_cpu",

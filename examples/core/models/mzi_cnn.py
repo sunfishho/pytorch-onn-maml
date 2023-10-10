@@ -6,14 +6,14 @@ LastEditors: Jiaqi Gu (jqgu@utexas.edu)
 LastEditTime: 2021-06-07 03:43:40
 """
 
-from torchonn.op.mzi_op import project_matrix_to_unitary
+from torchonn_maml.op.mzi_op import project_matrix_to_unitary
 from typing import List, Union
 
 import torch
 from torch import Tensor, nn
 from torch.types import Device, _size
-from torchonn.layers import MZIBlockConv2d, MZIBlockLinear
-from torchonn.models import ONNBaseModel
+from torchonn_maml.layers import MZIBlockConv2d, MZIBlockLinear
+from torchonn_maml.models import ONNBaseModel
 from collections import OrderedDict
 
 __all__ = ["MZI_CLASS_CNN"]

@@ -9,9 +9,9 @@ import unittest
 from pyutils.general import TimerCtx
 import torch
 import numpy as np
-import torchonn as onn
+import torchonn_maml as onn
 from pyutils.general import logger
-from torchonn.layers import (
+from torchonn_maml.layers import (
     MZIConv2d,
     MZILinear,
     MZIBlockConv2d,

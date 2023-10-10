@@ -1,24 +1,21 @@
 """
 Author: Hanqing Zhu(hqzhu@utexas.edu)
-Date: 2022-04-07 10:36:52
-LastEditTime: 2022-04-18 17:12:39
+Date: 2022-04-07 10:37:05
+LastEditTime: 2022-04-18 19:29:11
 LastEditors: Jiaqi Gu (jqgu@utexas.edu)
 Description:
+FilePath: /projects/ELight/core/models/layers/pcm_linear.py
 """
-
 import logging
 import math  # some math operations
-from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from pyutils.general import print_stat
 from pyutils.quantize import input_quantize_fn
 from torch import Tensor
 from torch.nn import Parameter, init
-from torch.nn.modules.utils import _pair
-from torch.types import Device, _size
-from torchonn.op.pcm_op import (
+from torch.types import Device
+from torchonn_maml.op.pcm_op import (
     weight_quantize_fn_log,
     weight_to_quantized_weight,
     weight_to_quantized_weight_cpu,
@@ -26,54 +23,28 @@ from torchonn.op.pcm_op import (
 
 from .base_layer import ONNBaseLayer
 
-__all__ = ["PCMConv2d"]
+__all__ = ["PCMLinear"]
 
 
-class PCMConv2d(ONNBaseLayer):
+class PCMLinear(ONNBaseLayer):
     """
-    Conv2d layer based on phase change material (PCM) crossbar array.
+    Linear layer based on phase change material (PCM) crossbar array.
     H. Zhu, et al., "ELight: Enabling Efficient Photonic In-Memory Neurocomputing with Life Enhancement", ASP-DAC 2022
     https://arxiv.org/pdf/2112.08512.pdf
     """
 
-    __constants__ = [
-        "stride",
-        "padding",
-        "dilation",
-        "groups",
-        "padding_mode",
-        "output_padding",
-        "in_channels",
-        "out_channels",
-        "kernel_size",
-        "block_size",
-    ]
-    __annotations__ = {"bias": Optional[torch.Tensor]}
-
-    _in_channels: int
-    out_channels: int
-    kernel_size: Tuple[int, ...]
-    stride: Tuple[int, ...]
-    padding: Tuple[int, ...]
-    dilation: Tuple[int, ...]
-    transposed: bool
-    output_padding: Tuple[int, ...]
-    groups: int
-    padding_mode: str
+    __constants__ = ["in_features", "out_features"]
+    in_features: int
+    out_features: int
+    block_size: int
     weight: Tensor
-    bias: Optional[Tensor]
     __mode_list__ = ["weight", "block"]
 
     def __init__(
         self,
         ## normal params
-        in_channels: int,
-        out_channels: int,
-        kernel_size: _size,
-        stride: _size = 1,
-        padding: _size = 0,
-        dilation: _size = 1,
-        groups: int = 1,
+        in_features,
+        out_features,
         bias: bool = True,
         block_size: int = 16,
         mode: str = "weight",
@@ -90,23 +61,16 @@ class PCMConv2d(ONNBaseLayer):
         has_zero: bool = True,
         device: Device = torch.device("cuda"),
     ) -> None:
-        super(PCMConv2d, self).__init__()
+        super(PCMLinear, self).__init__()
 
         # param init
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = _pair(kernel_size)
-        self.stride = _pair(stride)
-        self.padding = _pair(padding)
-        self.dilation = _pair(dilation)
-        self.groups = groups
-        assert groups == 1, f"Currently group convolution is not supported, but got group: {groups}"
-
+        self.in_features = in_features
+        self.out_features = out_features
         self.w_bit = 32
         self.in_bit = 32
         self.pcm_l = pcm_l
-        self.quant_ratio = quant_ratio
         self.device = device
+        self.quant_ratio = quant_ratio
 
         # PTC param
         self.mode = mode
@@ -128,7 +92,7 @@ class PCMConv2d(ONNBaseLayer):
         self.weight = None
         self.build_parameters()
         if bias:
-            self.bias = Parameter(torch.Tensor(self.out_channels).to(self.device))
+            self.bias = Parameter(torch.Tensor(self.out_features).to(self.device))
         else:
             self.register_parameter("bias", None)
 
@@ -172,32 +136,22 @@ class PCMConv2d(ONNBaseLayer):
         self.fast_forward_flag = False
 
     def build_parameters(self) -> None:
-        if self.mode == "weight":
-            self.weight = Parameter(
-                torch.Tensor(
-                    self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]
-                ).to(self.device)
-            )
+        if self.mode in {"weight"}:
+            self.weight = torch.Tensor(self.out_features, self.in_features).to(self.device)
+            self.weight = Parameter(self.weight)
         elif self.mode == "block":
-            # m*n -> p*q*k*k -> p*k = m; q*k = n
             self.weight = Parameter(
                 torch.Tensor(
-                    (self.out_channels + self.block_size - 1) // self.block_size,
-                    (self.in_channels * self.kernel_size[0] * self.kernel_size[1] + self.block_size - 1)
-                    // self.block_size,
+                    (self.out_features + self.block_size - 1) // self.block_size,
+                    (self.in_features + self.block_size - 1) // self.block_size,
                     self.block_size,
                     self.block_size,
-                ).to(self.device)
+                )
             )
         else:
-            self.weight = Parameter(
-                torch.Tensor(
-                    self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]
-                ).to(self.device)
-            )
+            self.weight = Parameter(torch.Tensor(self.out_features, self.in_features).to(self.device))
 
     def reset_parameters(self) -> None:
-        # init weight for Relu
         init.kaiming_normal_(self.weight.data, mode="fan_out", nonlinearity="relu")
 
         if self.bias is not None:
@@ -211,34 +165,24 @@ class PCMConv2d(ONNBaseLayer):
                 weight = self.weight_quantizer(self.weight)
             else:
                 weight = self.weight
-                weight = weight.view(
-                    self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]
-                )
+            weight = weight.view(self.out_features, -1)[:, : self.in_features]
         elif self.mode == "block":
             if self.w_bit < 16:
                 weight = self.weight_quantizer(self.weight)
             else:
                 weight = self.weight
 
-            # reshape weight
+            # reshape to out_features * in_features from p, q, k, k
             p, q, k, k = weight.size()
             weight = (
                 weight.permute([0, 2, 1, 3])
                 .contiguous()
-                .view(p * k, q * k)[
-                    : self.out_channels, : self.in_channels * self.kernel_size[0] * self.kernel_size[1]
-                ]
-                .view(self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1])
+                .view(p * k, q * k)[: self.out_features, : self.in_features]
+                .view(self.out_features, self.in_features)
                 .contiguous()
             )
 
         return weight
-
-    def enable_tolerance(self) -> None:
-        self.tolerate_stuck_fault = True
-
-    def disable_tolerance(self) -> None:
-        self.tolerate_stuck_fault = False
 
     def set_weight_bitwidth(self, w_bit: int) -> None:
         self.w_bit = w_bit
@@ -253,8 +197,7 @@ class PCMConv2d(ONNBaseLayer):
         self.input_quantizer.set_bitwidth(in_bit)
 
     def forward(self, x: Tensor) -> Tensor:
-        # need first update quant_noise' p at first
-        if self.in_bit <= 8:
+        if self.in_bit < 16:
             if "noise" in self.input_quant_method:
                 p = self.quant_ratio if self.training else 1
                 self.input_quantizer.set_quant_ratio(p)
@@ -265,19 +208,11 @@ class PCMConv2d(ONNBaseLayer):
         if not self.fast_forward_flag or self.weight is None:
             weight = self.build_weight()
         else:
-            weight = self.weight
+            weight = self.weight.view(self.out_features, -1)[:, : self.in_features]
 
-        out = F.conv2d(x, weight, self.bias, self.stride, self.padding)
+        out = F.linear(x, weight, self.bias)
 
         return out
-
-    def get_output_dim(self, img_height: int, img_width: int) -> Tuple[int, int]:
-        """
-        get the output features size
-        """
-        h_out = (img_height - self.kernel_size[0] + 2 * self.padding[0]) / self.stride[0] + 1
-        w_out = (img_width - self.kernel_size[1] + 2 * self.padding[1]) / self.stride[1] + 1
-        return (int(h_out), int(w_out))
 
     def get_difference_loss_global_L1(self, loss_flag: bool) -> Tensor:
         """
@@ -422,7 +357,7 @@ class PCMConv2d(ONNBaseLayer):
 
         return loss
 
-    def get_programming_levels_global_real(self, loss_flag: bool) -> Tensor:
+    def get_programming_levels_v4_real(self, loss_flag: bool) -> Tensor:
         """
         Compute the total number of write operations
             Use the avearge block for each row as the initialization block

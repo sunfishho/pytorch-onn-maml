@@ -17,8 +17,8 @@ from torch import Tensor, nn
 from torch.nn import Parameter, init
 from torch.nn.modules.utils import _pair
 from torch.types import Device, _size
-from torchonn.devices.mrr import MORRConfig_20um_MQ
-from torchonn.op.mrr_op import mrr_roundtrip_phase_to_tr_func, mrr_roundtrip_phase_to_tr_fused
+from torchonn_maml.devices.mrr import MORRConfig_20um_MQ
+from torchonn_maml.op.mrr_op import mrr_roundtrip_phase_to_tr_func, mrr_roundtrip_phase_to_tr_fused
 
 
 from .base_layer import ONNBaseLayer

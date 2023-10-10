@@ -13,7 +13,7 @@ import torch
 import torch.cuda
 from setuptools import Command, find_packages, setup
 from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CppExtension, CUDAExtension
-from torchonn import __version__
+from torchonn_maml import __version__
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -46,8 +46,8 @@ class CleanCommand(Command):
         self.set_undefined_options("bdist", ("bdist_base", "bdist_base"))
 
     def run(self):
-        os.system("rm -vrf ./build ./dist ./*.pyc ./*.tgz ./*.egg-info ./*.so ./torchonn/*.egg-info")
-        os.system("rm -vrf ./build ./dist ./*.pyc ./*.tgz ./*.egg-info ./*.so ./torchonn/*.egg-info")
+        os.system("rm -vrf ./build ./dist ./*.pyc ./*.tgz ./*.egg-info ./*.so ./torchonn_maml/*.egg-info")
+        os.system("rm -vrf ./build ./dist ./*.pyc ./*.tgz ./*.egg-info ./*.so ./torchonn_maml/*.egg-info")
 
 
 tokens = str(torch.__version__).split(".")
@@ -56,7 +56,7 @@ torch_minor_version = "-DTORCH_MINOR_VERSION=%d" % (int(tokens[1]))
 
 
 def add_prefix(filename):
-    return os.path.join("torchonn/op/cuda_extension", filename)
+    return os.path.join("torchonn_maml/op/cuda_extension", filename)
 
 
 ext_modules = []
@@ -106,7 +106,7 @@ if torch.cuda.is_available() and CUDA_HOME is not None:
     ext_modules.append(extension)
 
 setup(
-    name="torchonn",
+    name="torchonn_maml",
     version=__version__,
     description="Pytorch-centric Optical Neural Network Library",
     long_description=long_description,

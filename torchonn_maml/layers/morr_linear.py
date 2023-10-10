@@ -17,8 +17,8 @@ from pyutils.quantize import input_quantize_fn, weight_quantize_fn
 from torch import Tensor
 from torch.nn import Parameter, init
 from torch.types import Device
-from torchonn.devices.mrr import MORRConfig_20um_MQ
-from torchonn.op.mrr_op import mrr_roundtrip_phase_to_tr_func, mrr_roundtrip_phase_to_tr_fused
+from torchonn_maml.devices.mrr import MORRConfig_20um_MQ
+from torchonn_maml.op.mrr_op import mrr_roundtrip_phase_to_tr_func, mrr_roundtrip_phase_to_tr_fused
 
 from .base_layer import ONNBaseLayer
 

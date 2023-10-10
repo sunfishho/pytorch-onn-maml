@@ -16,8 +16,8 @@ from pyutils.general import logger
 from pyutils.torch_train import set_torch_deterministic
 from torch import Tensor, nn
 from torch.types import Device
-from torchonn.op.cross_op import hard_diff_round
-from torchonn.op.dc_op import dc_quantize_fn
+from torchonn_maml.op.cross_op import hard_diff_round
+from torchonn_maml.op.dc_op import dc_quantize_fn
 
 __all__ = [
     "SuperOpticalModule",

@@ -1,105 +1,70 @@
 """
 Description:
 Author: Jiaqi Gu (jqgu@utexas.edu)
-Date: 2021-11-28 00:13:10
+Date: 2021-11-27 19:02:52
 LastEditors: Jiaqi Gu (jqgu@utexas.edu)
-LastEditTime: 2021-11-28 00:23:47
+LastEditTime: 2021-11-27 22:17:35
 """
-
 from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
+from torch import nn
 import torch.nn.functional as F
-from pyutils.compute import im2col_2d, merge_chunks
+from pyutils.compute import gen_gaussian_noise, get_complex_energy, merge_chunks
 from pyutils.general import logger, print_stat
 from pyutils.quantize import input_quantize_fn, weight_quantize_fn
 from torch import Tensor
 from torch.nn import Parameter, init
-from torch.types import Device, _size
-from torch.nn.modules.utils import _pair
-from torchonn.layers.base_layer import ONNBaseLayer
-from torchonn.op.butterfly_op import TrainableButterfly
-from torchonn.op.mzi_op import PhaseQuantizer
+from torch.types import Device
+from torchonn_maml.layers.base_layer import ONNBaseLayer
+from torchonn_maml.op.butterfly_op import TrainableButterfly
+from torchonn_maml.op.mzi_op import PhaseQuantizer
 
 __all__ = [
-    "FFTONNBlockConv2d",
+    "FFTONNBlockLinear",
 ]
 
 
-class FFTONNBlockConv2d(ONNBaseLayer):
+class FFTONNBlockLinear(ONNBaseLayer):
     """
-    Butterfly blocking Conv2d layer.
+    Butterfly blocking Linear layer.
     J. Gu, et al., "Towards Area-Efficient Optical Neural Networks: An FFT-based Architecture," ASP-DAC 2020.
     https://ieeexplore.ieee.org/document/9045156
     """
 
-    __constants__ = [
-        "stride",
-        "padding",
-        "dilation",
-        "groups",
-        "padding_mode",
-        "output_padding",
-        "in_channels",
-        "out_channels",
-        "kernel_size",
-        "miniblock",
-    ]
-    __annotations__ = {"bias": Optional[torch.Tensor]}
-
-    _in_channels: int
-    out_channels: int
-    kernel_size: Tuple[int, ...]
-    stride: Tuple[int, ...]
-    padding: Tuple[int, ...]
-    dilation: Tuple[int, ...]
-    transposed: bool
-    output_padding: Tuple[int, ...]
-    groups: int
-    padding_mode: str
-    weight: Tensor
-    bias: Optional[Tensor]
+    __constants__ = ["in_features", "out_features"]
+    in_features: int
+    out_features: int
     miniblock: int
+    weight: Tensor
     __mode_list__ = ["fft", "hadamard", "zero_bias", "trainable"]
 
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: _size,
-        stride: _size = 1,
-        padding: _size = 0,
-        dilation: _size = 1,
-        groups: int = 1,
-        bias: bool = True,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
         miniblock: int = 4,
         mode: str = "fft",
         photodetect: bool = True,
         device: Device = torch.device("cpu"),
     ):
         super().__init__(device=device)
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = _pair(kernel_size)
-        self.stride = _pair(stride)
-        self.padding = _pair(padding)
-        self.dilation = _pair(dilation)
-        self.groups = groups
-        assert groups == 1, f"Currently group convolution is not supported, but got group: {groups}"
+        self.in_features = in_features
+        self.out_features = out_features
         self.miniblock = miniblock
-        self.in_channels_flat = self.in_channels * self.kernel_size[0] * self.kernel_size[1]
-        self.grid_dim_x = int(np.ceil(self.in_channels_flat / miniblock))
-        self.grid_dim_y = int(np.ceil(self.out_channels / miniblock))
-        self.in_channels_pad = self.grid_dim_x * miniblock
-        self.out_channels_pad = self.grid_dim_y * miniblock
+        self.grid_dim_x = int(np.ceil(self.in_features / miniblock))
+        self.grid_dim_y = int(np.ceil(self.out_features / miniblock))
+        self.in_features_pad = self.grid_dim_x * miniblock
+        self.out_features_pad = self.grid_dim_y * miniblock
         self.mode = mode
         assert mode in self.__mode_list__, logger.error(
             f"Mode not supported. Expected one from {self.__mode_list__} but got {mode}."
         )
         self.v_max = 10.8
         self.v_pi = 4.36
-        self.gamma = np.pi / self.v_pi ** 2
+        self.gamma = np.pi / self.v_pi**2
         self.w_bit = 32
         self.in_bit = 32
         self.photodetect = photodetect
@@ -155,7 +120,7 @@ class FFTONNBlockConv2d(ONNBaseLayer):
         self.set_crosstalk_factor(0)
 
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels).to(self.device))
+            self.bias = Parameter(torch.Tensor(out_features).to(self.device))
         else:
             self.register_parameter("bias", None)
 
@@ -247,17 +212,109 @@ class FFTONNBlockConv2d(ONNBaseLayer):
         if self.bias is not None:
             init.uniform_(self.bias, 0, 0)
 
+    @classmethod
+    def from_layer(
+        cls,
+        layer: nn.Linear,
+        miniblock: int = 4,
+        mode: str = "fft",
+        photodetect: bool = True,
+        verbose: bool = False,
+    ) -> nn.Module:
+        """Initialize from a nn.Linear layer. Weight mapping will be performed
+
+        Args:
+            miniblock (int, optional): miniblock size. Defaults to 4.
+            mode (str, optional): parametrization mode. Defaults to "fft".
+            photodetect (bool, optional): whether to use photodetect. Defaults to True.
+
+        Returns:
+            Module: a converted FFTONNBlockLinear module
+        """
+        assert isinstance(layer, nn.Linear), f"The conversion target must be nn.Linear, but got {type(layer)}."
+        in_features = layer.in_features
+        out_features = layer.out_features
+        bias = layer.bias is not None
+        device = layer.weight.data.device
+        instance = cls(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            miniblock=miniblock,
+            mode=mode,
+            photodetect=photodetect,
+            device=device,
+        ).to(device)
+        weight = instance.weight
+        tmp = torch.zeros(instance.out_features_pad, instance.in_features_pad, dtype=torch.cfloat, device=instance.device)
+        tmp.data.real[:out_features, :in_features].copy_(layer.weight)
+        instance.weight.data.copy_(
+            tmp.view(weight.shape[0], weight.shape[2], weight.shape[1], weight.shape[3]).permute(0, 2, 1, 3)
+        )
+        instance.sync_parameters(src="weight", verbose=verbose)
+        if bias:
+            instance.bias.data.copy_(layer.bias)
+
+        return instance
+
     def build_weight_from_usv(self, U: Tensor, S: Tensor, V: Tensor) -> Tensor:
         # differentiable feature is gauranteed
         weight = U.matmul(S.unsqueeze(-1) * V)
         self.weight.data.copy_(weight)
         return weight
 
-    def sync_parameters(self, src: str = "weight") -> None:
+    def sync_parameters(self, src: str = "weight", steps: int = 3000, verbose: bool = False) -> None:
         """
         description: synchronize all parameters from the source parameters
         """
-        self.weight.data.copy_(self.build_weight_from_usv(self.U.data, self.S.data, self.V.data))
+        if src == "phase":
+            # phase to weight
+            self.weight.data.copy_(self.build_weight_from_usv(self.U.data, self.S.data, self.V.data))
+        elif src == "weight":
+            # weight to phase
+            target = self.weight.data
+            params = {}
+            if not self.T.phases.requires_grad:
+                target = target.matmul(torch.linalg.inv(self.V.data))
+            else:
+                params["V"] = self.T.phases
+            if not self.Tr.phases.requires_grad:
+                target = torch.linalg.inv(self.U.data).matmul(target)
+            else:
+                params["U"] = self.Tr.phases
+        
+            params["S"] = self.S
+            if len(params) == 1:  # only has self.S, perform optimal singular value projection
+                self.S.data.copy_(torch.linalg.diagonal(target))
+            else:  # perform gradient descent to solve
+                optimizer = torch.optim.Adam(list(params.values()), lr=1e-3)
+                for i in range(steps):
+                    w = self.S
+                    if "V" in params:
+                        w = w.unsqueeze(-1) * self.V
+                        
+                    if "U" in params:
+                        U = self.U
+                        if w.ndim == self.S.ndim + 1:
+                            w = U.matmul(w)
+                        else:
+                            w = U * w.unsqueeze(-2)
+                            
+                    loss = F.mse_loss(torch.view_as_real(target), torch.view_as_real(w))
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    if verbose and (i % 500 == 0 or i == steps - 1):
+                        logger.info(f"Sync weight to phase: step = {i:5d}, mse = {loss.item():.2e}")
+
+        else:
+            raise NotImplementedError
+        if verbose:
+            with torch.no_grad():
+                target = self.weight.data.clone()
+                w = self.build_weight()
+                error = F.mse_loss(torch.view_as_real(w), torch.view_as_real(target))
+                logger.info(f"Mapping Linear to FFTONNBlockLinear: MSE = {error:.2e}")
 
     def build_weight(self, update_list: set = {"phase_U", "phase_S", "phase_V"}) -> Tensor:
         weight = self.build_weight_from_usv(self.U, self.S, self.V)
@@ -293,48 +350,27 @@ class FFTONNBlockConv2d(ONNBaseLayer):
         """
         super().load_parameters(param_dict=param_dict)
 
-    def get_output_dim(self, img_height: int, img_width: int) -> Tuple[int, int]:
-        """
-        get the output features size
-        """
-        h_out = (img_height - self.kernel_size[0] + 2 * self.padding[0]) / self.stride[0] + 1
-        w_out = (img_width - self.kernel_size[1] + 2 * self.padding[1]) / self.stride[1] + 1
-        return (int(h_out), int(w_out))
-
     def forward(self, x: Tensor) -> Tensor:
         if self.in_bit < 16:
             x = self.input_quantizer(x)
-
+        x = x.to(torch.cfloat)
         if not self.fast_forward_flag or self.weight is None:
             weight = self.build_weight()  # [p, q, k, k]
         else:
             weight = self.weight
-
-        bs = x.size(0)
         offset = int(np.ceil(self.grid_dim_x / 2)) * self.miniblock
-        weight = merge_chunks(weight)[
-            : self.out_channels, : self.in_channels * self.kernel_size[0] * self.kernel_size[1]
-        ]
-        _, x, h_out, w_out = im2col_2d(
-            W=None,
-            X=x,
-            stride=self.stride[0],
-            padding=self.padding[0],
-            w_size=(self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]),
-        )
-        x = x.to(torch.cfloat)
-        weight_pos = weight[:, :offset]
-        weight_neg = weight[:, offset:]
-        x_pos = x[:offset, :]
-        x_neg = x[offset:, :]
-        x_pos = weight_pos.matmul(x_pos)
+        weight = merge_chunks(weight)[: self.out_features, : self.in_features].t()
+        weight_pos = weight[:offset, :]
+        weight_neg = weight[offset:, :]
+        x_pos = x[..., :offset]
+        x_neg = x[..., offset:]
+        x_pos = x_pos.matmul(weight_pos)
         x_pos = x_pos.real.square() + x_pos.imag.square()
-        x_neg = weight_neg.matmul(x_neg)
+        x_neg = x_neg.matmul(weight_neg)
         x_neg = x_neg.real.square() + x_neg.imag.square()
         x = x_pos - x_neg
-        x = x.view(self.out_channels, h_out, w_out, bs).permute(3, 0, 1, 2).contiguous()
 
         if self.bias is not None:
-            x = x + self.bias.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            x = x + self.bias.unsqueeze(0)
 
         return x

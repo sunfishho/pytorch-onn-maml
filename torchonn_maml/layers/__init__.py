@@ -1,9 +1,9 @@
 """
 Description:
 Author: Jiaqi Gu (jqgu@utexas.edu)
-Date: 2021-06-08 22:52:01
+Date: 2021-06-09 01:40:22
 LastEditors: Jiaqi Gu (jqgu@utexas.edu)
-LastEditTime: 2021-06-08 22:52:01
+LastEditTime: 2021-06-09 01:40:22
 """
 
 import importlib
@@ -13,7 +13,7 @@ import os
 for file in sorted(os.listdir(os.path.dirname(__file__))):
     if file.endswith(".py") and not file.startswith("_"):
         source = file[: file.find(".py")]
-        module = importlib.import_module("torchonn.devices." + source)
+        module = importlib.import_module("torchonn_maml.layers." + source)
         if "__all__" in module.__dict__:
             names = module.__dict__["__all__"]
         else:

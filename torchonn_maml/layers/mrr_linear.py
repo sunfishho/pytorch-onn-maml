@@ -10,80 +10,47 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from torch import nn
 import torch.nn.functional as F
-from pyutils.compute import gen_gaussian_noise, merge_chunks, add_gaussian_noise
+from pyutils.compute import add_gaussian_noise, merge_chunks
 from pyutils.general import logger, print_stat
 from pyutils.quantize import input_quantize_fn, weight_quantize_fn
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn import Parameter, init
-from torch.types import Device, _size
-from torch.nn.modules.utils import _pair
-from torchonn.layers.base_layer import ONNBaseLayer
-from torchonn.op.mrr_op import mrr_roundtrip_phase_to_tr_func, mrr_tr_to_roundtrip_phase
-from torchonn.devices.mrr import MRRConfig_5um_HQ
+from torch.types import Device
 
+from torchonn_maml.devices.mrr import MRRConfig_5um_HQ
+from torchonn_maml.layers.base_layer import ONNBaseLayer
+from torchonn_maml.op.mrr_op import mrr_roundtrip_phase_to_tr_func, mrr_tr_to_roundtrip_phase
 
 __all__ = [
-    "AddDropMRRConv2d",
-    "AddDropMRRBlockConv2d",
+    "AddDropMRRLinear",
+    "AddDropMRRBlockLinear",
 ]
 
 
-class AddDropMRRConv2d(ONNBaseLayer):
+class AddDropMRRLinear(ONNBaseLayer):
     """
-    Conv2d layer constructed by cascaded AddDropMRRs.
+    Linear layer constructed by cascaded AddDropMRRs.
     """
 
-    __constants__ = [
-        "stride",
-        "padding",
-        "dilation",
-        "groups",
-        "padding_mode",
-        "output_padding",
-        "in_channels",
-        "out_channels",
-        "kernel_size",
-    ]
-    __annotations__ = {"bias": Optional[torch.Tensor]}
-
-    _in_channels: int
-    out_channels: int
-    kernel_size: Tuple[int, ...]
-    stride: Tuple[int, ...]
-    padding: Tuple[int, ...]
-    dilation: Tuple[int, ...]
-    transposed: bool
-    output_padding: Tuple[int, ...]
-    groups: int
-    padding_mode: str
+    __constants__ = ["in_features", "out_features"]
+    in_features: int
+    out_features: int
     weight: Tensor
-    bias: Optional[Tensor]
+    __annotations__ = {"bias": Optional[Tensor]}
 
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: _size,
-        stride: _size = 1,
-        padding: _size = 0,
-        dilation: _size = 1,
-        groups: int = 1,
+        in_features: int,
+        out_features: int,
         bias: bool = True,
         mode: str = "weight",
         MRRConfig=MRRConfig_5um_HQ,
         device: Device = torch.device("cpu"),
     ):
-        super(AddDropMRRConv2d, self).__init__(device=device)
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = _pair(kernel_size)
-        self.stride = _pair(stride)
-        self.padding = _pair(padding)
-        self.dilation = _pair(dilation)
-        self.groups = groups
-        assert groups == 1, "Currently group convolution is not supported."
+        super(AddDropMRRLinear, self).__init__(device=device)
+        self.in_features = in_features
+        self.out_features = out_features
         self.mode = mode
         assert mode in {"weight", "phase"}, logger.error(
             f"Mode not supported. Expected one from (weight, phase) but got {mode}."
@@ -120,7 +87,7 @@ class AddDropMRRConv2d(ONNBaseLayer):
         self.set_crosstalk_factor(0)
 
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels).to(self.device))
+            self.bias = Parameter(torch.Tensor(out_features).to(self.device))
         else:
             self.register_parameter("bias", None)
 
@@ -128,17 +95,13 @@ class AddDropMRRConv2d(ONNBaseLayer):
 
     def build_parameters(self, mode: str = "weight") -> None:
         phase = torch.empty(
-            self.out_channels,
-            self.in_channels,
-            self.kernel_size[0],
-            self.kernel_size[1],
+            self.out_features,
+            self.in_features,
             device=self.device,
         )
         weight = torch.empty(
-            self.out_channels,
-            self.in_channels,
-            self.kernel_size[0],
-            self.kernel_size[1],
+            self.out_features,
+            self.in_features,
             device=self.device,
         )
         # TIA gain
@@ -161,10 +124,6 @@ class AddDropMRRConv2d(ONNBaseLayer):
         }.items():
             if not hasattr(self, p_name):
                 self.register_buffer(p_name, p)
-
-        self.in_channels_flat = (
-            self.in_channels * self.kernel_size[0] * self.kernel_size[1]
-        )
 
     def reset_parameters(self) -> None:
         if self.mode in {"weight"}:
@@ -190,11 +149,11 @@ class AddDropMRRConv2d(ONNBaseLayer):
     @classmethod
     def from_layer(
         cls,
-        layer: nn.Conv2d,
+        layer: nn.Linear,
         mode: str = "weight",
         MRRConfig=MRRConfig_5um_HQ,
     ) -> nn.Module:
-        """Initialize from a nn.Conv2d layer. Weight mapping will be performed
+        """Initialize from a nn.Linear layer. Weight mapping will be performed
 
         Args:
             mode (str, optional): parametrization mode. Defaults to "weight".
@@ -202,28 +161,18 @@ class AddDropMRRConv2d(ONNBaseLayer):
             photodetect (bool, optional): whether to use photodetect. Defaults to True.
 
         Returns:
-            Module: a converted AddDropMRRConv2d module
+            Module: a converted AddDropMRRLinear module
         """
         assert isinstance(
-            layer, nn.Conv2d
-        ), f"The conversion target must be nn.Conv2d, but got {type(layer)}."
-        in_channels = layer.in_channels
-        out_channels = layer.out_channels
-        kernel_size = layer.kernel_size
-        stride = layer.stride
-        padding = layer.padding
-        dilation = layer.dilation
-        groups = layer.groups
+            layer, nn.Linear
+        ), f"The conversion target must be nn.Linear, but got {type(layer)}."
+        in_features = layer.in_features
+        out_features = layer.out_features
         bias = layer.bias is not None
         device = layer.weight.data.device
         instance = cls(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
+            in_features=in_features,
+            out_features=out_features,
             bias=bias,
             mode=mode,
             MRRConfig=MRRConfig,
@@ -354,115 +303,57 @@ class AddDropMRRConv2d(ONNBaseLayer):
         if self.mode == "phase":
             self.build_weight(update_list=param_dict)
 
-    def get_output_dim(self, img_height: int, img_width: int) -> _size:
-        h_out = (
-            img_height
-            - self.dilation[0] * (self.kernel_size[0] - 1)
-            - 1
-            + 2 * self.padding[0]
-        ) / self.stride[0] + 1
-        w_out = (
-            img_width
-            - self.dilation[1] * (self.kernel_size[1] - 1)
-            - 1
-            + 2 * self.padding[1]
-        ) / self.stride[1] + 1
-        return int(h_out), int(w_out)
-
     def forward(self, x: Tensor) -> Tensor:
         if self.in_bit < 16:
             x = self.input_quantizer(x)
         if not self.fast_forward_flag or self.weight is None:
-            weight = self.build_weight()  # [out_channels, in_channels_flat]
+            weight = self.build_weight()  # [out_features, in_features]
         else:
             weight = self.weight
-        weight = weight.view(
-            -1, self.in_channels, self.kernel_size[0], self.kernel_size[1]
-        )
-        x = F.conv2d(
+
+        x = F.linear(
             x,
             weight,
             bias=self.bias,
-            stride=self.stride,
-            padding=self.padding,
-            dilation=self.dilation,
-            groups=self.groups,
         )
 
         return x
 
 
-class AddDropMRRBlockConv2d(ONNBaseLayer):
+class AddDropMRRBlockLinear(ONNBaseLayer):
     """
-    blocking Conv2d layer constructed by cascaded AddDropMRRs.
+    blocking Linear layer constructed by cascaded AddDropMRRs.
     """
 
-    __constants__ = [
-        "stride",
-        "padding",
-        "dilation",
-        "groups",
-        "padding_mode",
-        "output_padding",
-        "in_channels",
-        "out_channels",
-        "kernel_size",
-        "miniblock",
-    ]
-    __annotations__ = {"bias": Optional[torch.Tensor]}
-
-    _in_channels: int
-    out_channels: int
-    kernel_size: Tuple[int, ...]
-    stride: Tuple[int, ...]
-    padding: Tuple[int, ...]
-    dilation: Tuple[int, ...]
-    transposed: bool
-    output_padding: Tuple[int, ...]
-    groups: int
-    padding_mode: str
-    weight: Tensor
-    bias: Optional[Tensor]
+    __constants__ = ["in_features", "out_features"]
+    in_features: int
+    out_features: int
     miniblock: int
+    weight: Tensor
+    __annotations__ = {"bias": Optional[Tensor]}
 
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: _size,
-        stride: _size = 1,
-        padding: _size = 0,
-        dilation: _size = 1,
-        groups: int = 1,
+        in_features: int,
+        out_features: int,
         bias: bool = True,
         miniblock: int = 4,
         mode: str = "weight",
         MRRConfig=MRRConfig_5um_HQ,
         device: Device = torch.device("cpu"),
     ):
-        super(AddDropMRRBlockConv2d, self).__init__(device=device)
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = _pair(kernel_size)
-        self.stride = _pair(stride)
-        self.padding = _pair(padding)
-        self.dilation = _pair(dilation)
-        self.groups = groups
-        assert (
-            groups == 1
-        ), f"Currently group convolution is not supported, but got group: {groups}"
+        super(AddDropMRRBlockLinear, self).__init__(device=device)
+        self.in_features = in_features
+        self.out_features = out_features
         self.mode = mode
         assert mode in {"weight", "phase", "voltage"}, logger.error(
-            f"Mode not supported. Expected one from (weight, phase, voltage) but got {mode}."
+            f"Mode not supported. Expected one from (weight, usv, phase, voltage) but got {mode}."
         )
         self.miniblock = miniblock
-        self.in_channels_flat = (
-            self.in_channels * self.kernel_size[0] * self.kernel_size[1]
-        )
-        self.grid_dim_x = int(np.ceil(self.in_channels_flat / miniblock))
-        self.grid_dim_y = int(np.ceil(self.out_channels / miniblock))
-        self.in_channels_pad = self.grid_dim_x * miniblock
-        self.out_channels_pad = self.grid_dim_y * miniblock
+        self.grid_dim_x = int(np.ceil(self.in_features / miniblock))
+        self.grid_dim_y = int(np.ceil(self.out_features / miniblock))
+        self.in_features_pad = self.grid_dim_x * miniblock
+        self.out_features_pad = self.grid_dim_y * miniblock
 
         self.MRRConfig = MRRConfig
         self.v_max = 10.8
@@ -496,7 +387,7 @@ class AddDropMRRBlockConv2d(ONNBaseLayer):
         self.set_crosstalk_factor(0)
 
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels).to(self.device))
+            self.bias = Parameter(torch.Tensor(out_features).to(self.device))
         else:
             self.register_parameter("bias", None)
 
@@ -565,11 +456,11 @@ class AddDropMRRBlockConv2d(ONNBaseLayer):
     @classmethod
     def from_layer(
         cls,
-        layer: nn.Conv2d,
+        layer: nn.Linear,
         mode: str = "weight",
         MRRConfig=MRRConfig_5um_HQ,
     ) -> nn.Module:
-        """Initialize from a nn.Conv2d layer. Weight mapping will be performed
+        """Initialize from a nn.Linear layer. Weight mapping will be performed
 
         Args:
             mode (str, optional): parametrization mode. Defaults to "weight".
@@ -577,28 +468,18 @@ class AddDropMRRBlockConv2d(ONNBaseLayer):
             photodetect (bool, optional): whether to use photodetect. Defaults to True.
 
         Returns:
-            Module: a converted AddDropMRRConv2d module
+            Module: a converted AddDropMRRLinear module
         """
         assert isinstance(
-            layer, nn.Conv2d
-        ), f"The conversion target must be nn.Conv2d, but got {type(layer)}."
-        in_channels = layer.in_channels
-        out_channels = layer.out_channels
-        kernel_size = layer.kernel_size
-        stride = layer.stride
-        padding = layer.padding
-        dilation = layer.dilation
-        groups = layer.groups
+            layer, nn.Linear
+        ), f"The conversion target must be nn.Linear, but got {type(layer)}."
+        in_features = layer.in_features
+        out_features = layer.out_features
         bias = layer.bias is not None
         device = layer.weight.data.device
         instance = cls(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
+            in_features=in_features,
+            out_features=out_features,
             bias=bias,
             mode=mode,
             MRRConfig=MRRConfig,
@@ -731,21 +612,6 @@ class AddDropMRRBlockConv2d(ONNBaseLayer):
         if self.mode == "phase":
             self.build_weight(update_list=param_dict)
 
-    def get_output_dim(self, img_height: int, img_width: int) -> _size:
-        h_out = (
-            img_height
-            - self.dilation[0] * (self.kernel_size[0] - 1)
-            - 1
-            + 2 * self.padding[0]
-        ) / self.stride[0] + 1
-        w_out = (
-            img_width
-            - self.dilation[1] * (self.kernel_size[1] - 1)
-            - 1
-            + 2 * self.padding[1]
-        ) / self.stride[1] + 1
-        return int(h_out), int(w_out)
-
     def forward(self, x: Tensor) -> Tensor:
         if self.in_bit < 16:
             x = self.input_quantizer(x)
@@ -753,17 +619,11 @@ class AddDropMRRBlockConv2d(ONNBaseLayer):
             weight = self.build_weight()  # [p, q, k, k]
         else:
             weight = self.weight
-        weight = merge_chunks(weight)[
-            : self.out_channels, : self.in_channels_flat
-        ].view(-1, self.in_channels, self.kernel_size[0], self.kernel_size[1])
-        x = F.conv2d(
+        weight = merge_chunks(weight)[: self.out_features, : self.in_features]
+        x = F.linear(
             x,
             weight,
             bias=self.bias,
-            stride=self.stride,
-            padding=self.padding,
-            dilation=self.dilation,
-            groups=self.groups,
         )
 
         return x
