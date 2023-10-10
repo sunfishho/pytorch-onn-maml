@@ -244,9 +244,9 @@ class MZIBlockConv2d(ONNBaseLayer):
                     device=self.device,
                 )
             )
-            # U, S, V = torch.svd(W, some=False)
-            # V = V.transpose(-2, -1)
-            U, S, V = torch.linalg.svd(W, full_matrices=True, driver="gesvd") # must use QR decomposition
+            U, S, V = torch.svd(W, some=False)
+            V = V.transpose(-2, -1)
+            # U, S, V = torch.linalg.svd(W, full_matrices=True, driver="gesvd") # must use QR decomposition
             self.U.data.copy_(U)
             self.V.data.copy_(V)
             self.S.data.copy_(torch.ones_like(S, device=self.device))
@@ -261,9 +261,9 @@ class MZIBlockConv2d(ONNBaseLayer):
                     device=self.device,
                 )
             )
-            # U, S, V = torch.svd(W, some=False)
-            # V = V.transpose(-2, -1)
-            U, S, V = torch.linalg.svd(W, full_matrices=True, driver="gesvd") # must use QR decomposition
+            U, S, V = torch.svd(W, some=False)
+            V = V.transpose(-2, -1)
+            # U, S, V = torch.linalg.svd(W, full_matrices=True, driver="gesvd") # must use QR decomposition
             delta_list, phi_mat = self.decomposer.decompose(U)
             self.delta_list_U.data.copy_(delta_list)
             self.phase_U.data.copy_(self.decomposer.m2v(phi_mat))
@@ -583,7 +583,19 @@ class MZIBlockConv2d(ONNBaseLayer):
         ] + 1
         return int(h_out), int(w_out)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, new_params = None) -> Tensor:
+        if new_params != None:
+            if self.mode == 'usv':
+                # this means new_params[0] is U, new_params[1] is V, and new_params[2] is bias
+                self.U.data.copy_(new_params[0])
+                self.V.data.copy_(new_params[1])
+                self.bias.data.copy_(new_params[2])
+            elif self.mode == 'phase':
+                # this means new_params[0] is phase_U, new_params[1] is phase_V, and new_params[2] is bias
+                self.phase_U.data.copy_(new_params[0])
+                self.phase_V.data.copy_(new_params[1])
+                self.bias.data.copy_(new_params[2])
+            
         if self.in_bit < 16:
             x = self.input_quantizer(x)
         if not self.fast_forward_flag or self.weight is None:
